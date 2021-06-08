@@ -1,5 +1,5 @@
 # node-imm
-These are utils for IMM2/XCC with promises. 
+These are utils for Lenovo/IBM IMM2/XCC with promises. 
 I had goal working with ssl certs, therefore was realized only:
 * reboot IMM/XCC
 * ssh connect
