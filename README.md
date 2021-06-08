@@ -29,6 +29,8 @@ let ssl = new IMM.webssl("imm1.example.ru");
 let execcommand = await ssl.generateCSR({sshUser: argv.user, sshPassword: argv.password, csrCPerson: "Ivanov A.V.", csrCEmail: "iav@mail.ru", csrOrgUnit: "IT", csrDomainQ: "example.ru"});
 execcommand = await ssl.uploadCSR({TFTPlistenip: "192.168.1.124", TFTPdir: "D:\\user1\\tftpdir"});
 ```
+If you use IMM.webssl, take into account that it will start local TFTP server. Therefore, **you must have sufficient permissions (especially on linux system)**.
+
 Upload certificate (.csr file) from CA to IMM2/XCC. If csr filename don't pass in setupCER(), method will try find .csr file with proper hostname in TFTPdir:
 ```
 let ssl = new IMM.webssl("imm1.example.ru");
