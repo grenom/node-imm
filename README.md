@@ -37,3 +37,6 @@ if (await ssl.getIMMtype({})  == 'IMM2')
 
 # Dependencies
 [fs](https://nodejs.org/api/fs.html), [fs/promises](https://nodejs.org/api/fs.html), [ssh2](https://www.npmjs.com/package/ssh2#client-methods), [tftp](https://www.npmjs.com/package/tftp#server_close)
+```
+npm install ssh2 tftp
+```
