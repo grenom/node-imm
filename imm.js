@@ -1,17 +1,23 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 let sshclient = require('ssh2').Client;
-const tftp = require("tftp");
+let TFTPServer = require('./tftp.js').TFTPServer;
+
 
 class IMM {
     #sshconnection;
     _sshusername;
     _sshpassword;
 
-    constructor (immhostname){
+    constructor ({immhostname, sshUser, sshPassword}){
         if (!immhostname || typeof(immhostname) != 'string') {
             throw new Error(`Hostname not correct: hostname - "${immhostname}"`);
         }
+        if (!sshUser || !sshPassword) {
+            throw new Error(`Invalid credentials for SSH-connection: username - "${sshUser}", password - "${sshPassword}"`);
+        }
+        this._sshusername = sshUser;
+        this._sshpassword = sshPassword;
         this._hostname = immhostname;
     }
 
@@ -21,12 +27,7 @@ class IMM {
 
     //////////////////SSH client////////////////////////////////////////////////
     //////////////////////////////////////////////////////////////////////////////
-    async sshConnect ({sshUser, sshPassword}) {
-        if (!sshUser || !sshPassword) {
-            throw new Error(`Invalid credentials for SSH-connection: username - "${sshUser}", password - "${sshPassword}"`);
-        }
-        this._sshusername = sshUser;
-        this._sshpassword = sshPassword;
+    async sshConnect () {
         this.#sshconnection = new sshclient();
         let ready = new Promise((resolve, reject) => {
             this.#sshconnection.once('ready', () => resolve());
@@ -36,9 +37,9 @@ class IMM {
         return ready;
     }
 
-    async sshConnectIfNotConnected ({sshUser=this._sshusername, sshPassword=this._sshpassword}) {
+    async sshConnectIfNotConnected () {
         if (!this.isSshConnected()) {
-            return this.sshConnect({sshUser, sshPassword});
+            return this.sshConnect();
         }
         return true;
     }
@@ -62,7 +63,7 @@ class IMM {
     }
 
     async sshExecCommand (command) {
-        await this.sshConnectIfNotConnected({});// на случай если из методов класса будет disconect, еще раз подключимся со старыми учетными данными
+        await this.sshConnectIfNotConnected();// на случай если из методов класса будет disconect, еще раз подключимся со старыми учетными данными
         let sshdata = {stdout: '', stderr: ''};
         return new Promise ((resolve, reject) => {
             this.#sshconnection.exec(command, (err, stream) => {
@@ -83,6 +84,12 @@ class IMM {
         }
     }
 
+    _checkSSHout_dotok (command, sshout) {
+        if(sshout.stdout.search(/^system> \.+ok$/m) == -1 || sshout.stderr.length > 0) {
+            throw new Error(`Command "${command}" on "${this.getHostname()}" executed with non-ok output: stdout - "${sshout.stdout}", stderr - "${sshout.stderr}"`);
+        }
+    }
+
     isSshConnected () {
         if (this.#sshconnection) {
             return true;
@@ -97,8 +104,8 @@ class IMM {
         return this._sshpassword;
     }
     //////////////////////////////////////////////////////////////////////////////
-    async immRestart ({sshUser=this._sshusername, sshPassword=this._sshpassword}) {
-        await this.sshConnectIfNotConnected({sshUser: sshUser, password: sshPassword});
+    async immRestart () {
+        await this.sshConnectIfNotConnected();
         let command_reset = "spreset";
         let sshout = await this.sshExecCommand(command_reset);
         if(sshout.stdout.search(/^system> Submitting reset request.. Reset done.$/m) == -1 || sshout.stderr.length > 0) {
@@ -108,8 +115,8 @@ class IMM {
         //может зависнуть при отключении
     }
 
-    async getIMMtype ({sshUser=this._sshusername, sshPassword=this._sshpassword}) {
-        await this.sshConnectIfNotConnected({username: sshUser, password: sshPassword});
+    async getIMMtype () {
+        await this.sshConnectIfNotConnected();
         let command_check = "vpd bmc";
         let sshout = await this.sshExecCommand(command_check);
         if(sshout.stdout.search(/^system> Unknown option: bmc$/m) != -1 && sshout.stderr.length == 0) {
@@ -125,67 +132,17 @@ class IMM {
     }
 };
 
-class TFTPServer extends IMM {
-    #ftpserver;
-    #connections;
 
-    async _startTFTPServer ({listenip, port=69, dir}) {
-        this.#ftpserver = tftp.createServer ({ host: listenip, port, denyPUT: false, root: dir});
-        let p_listen = new Promise ((resolve, reject) => {
-            this.#ftpserver.once("error", error => {reject(`Main socket TFTP server error: "${error}"`)});
-            this.#ftpserver.once("listening", () => resolve());
-        });
-        this.#ftpserver.listen();
-        return p_listen;
-    }
-
-    async _waitTFTPuploadFile () {
-        return new Promise ((resolve, reject) => {
-            this.#ftpserver.once('request', (req, res) => {
-                let remotehost = req.stats.remoteAddress;
-                if (req.method == "PUT") {
-                    let filename = req.file;
-                    req.once('end', () => resolve(filename));   
-                }
-                req.once ('error', (error) => reject(`query error occur to TFTP server: ${error}`));
-            });
-        });
-    }
-
-    async _waitTFTPdownloadFile () {
-        return new Promise ((resolve, reject) => {
-            this.#ftpserver.once('request', (req, res) => {
-                let remotehost = req.stats.remoteAddress;
-                if (req.method == "GET") {
-                    let filename = req.file;
-                    req.once('close', () => resolve(filename));
-                }
-                req.once ('error', (error) => reject(`query error occur to TFTP server: ${error}`));
-            });
-            //console.debug("DEBUG: waitTFTPdownloadFile init.");
-        });
-    }
-
-    async _stopTFTPserver () {
-        if (this.#ftpserver)
-        {
-            let p_close_tftpserver = new Promise ((resolve, reject) => {
-                this.#ftpserver.once('close', () => {
-                    resolve();
-                    this.#ftpserver=undefined;
-                });
-            });
-            this.#ftpserver.close();
-            return p_close_tftpserver;
-        }
-        return true;
-    }
-}
-
-
-class webssl extends TFTPServer {
+class webssl extends IMM {
     _csrFilePath;
     _certFilePath;
+    _TFTP;
+
+    constructor ({immhostname, sshUser, sshPassword}) {
+        super({immhostname, sshUser, sshPassword});
+        this._TFTP=new TFTPServer();
+    }
+
     //////////////////other///////////////////////////////////////////////////////
     //////////////////////////////////////////////////////////////////////////////
     async #checkFile (filename) {
@@ -215,13 +172,13 @@ class webssl extends TFTPServer {
     }
     ////////////////////////////////////////////////////////////////////////////
 
-    async generateCSR ({sshUser = this._sshGetUsername(), sshPassword = this._sshGetPassword(), csrCountry="RU" ,csrState="Far East", csrCity="Khabarovsk", csrOrg="JSC SO UES Branch of ODU East", 
+    async generateCSR ({csrCountry="RU" ,csrState="Far East", csrCity="Khabarovsk", csrOrg="JSC SO UES Branch of ODU East", 
         csrHostName=this.getHostname(), csrCPerson, csrCEmail, csrOrgUnit, csrDomainQ}) {
 
         let command = `sslcfg -csr server -c "${csrCountry}" -sp "${csrState}" -cl "${csrCity}" -on "${csrOrg}" -hn "${csrHostName}" -cp "${csrCPerson}" -ea "${csrCEmail}" -ou "${csrOrgUnit}" -dq "${csrDomainQ}"`;
         try 
         {
-            await this.sshConnectIfNotConnected({sshUser, sshPassword});
+            await this.sshConnectIfNotConnected();
             let sshout = await this.sshExecCommand(command);
             this._checkSSHout_ok(command, sshout);
         } 
@@ -233,13 +190,13 @@ class webssl extends TFTPServer {
         return command;
     }
 
-    async uploadCSR ({sshUser = this._sshGetUsername(), sshPassword = this._sshGetPassword(), TFTPlistenip, TFTPlistenport=69, TFTPdir, uploadFileName=`${this.getHostname()}.csr`}) {
+    async uploadCSR ({TFTPlistenip, TFTPlistenport=69, TFTPdir, uploadFileName=`${this.getHostname()}.csr`}) {
         let command = `sslcfg -csr server -dnld -i ${TFTPlistenip} -l "${uploadFileName}"`;
         try 
         {
-            await this._startTFTPServer({listenip: TFTPlistenip, port: TFTPlistenport, dir: TFTPdir});
-            let p_fileuplod = this._waitTFTPuploadFile();
-            await this.sshConnectIfNotConnected({sshUser, sshPassword});
+            await this._TFTP.startTFTPServer({listenip: TFTPlistenip, port: TFTPlistenport, dir: TFTPdir});
+            let p_fileuplod = this._TFTP._waitTFTPuploadFile();
+            await this.sshConnectIfNotConnected();
             let sshout = await this.sshExecCommand(command);
             this._checkSSHout_ok(command, sshout);
             let TFTPuploadfilename = await p_fileuplod;
@@ -251,12 +208,12 @@ class webssl extends TFTPServer {
             throw error
         } finally {
             await this.sshDisconnect();
-            await this._stopTFTPserver();
+            await this._TFTP.stopTFTPserver();
         }
         return command;
     }
 
-    async setupCER ({sshUser = this._sshGetUsername(), sshPassword = this._sshGetPassword(), TFTPlistenip, TFTPlistenport=69, TFTPdir, SSLcertFileName})
+    async setupCER ({TFTPlistenip, TFTPlistenport=69, TFTPdir, SSLcertFileName})
     {
         let command;
         try {
@@ -264,9 +221,9 @@ class webssl extends TFTPServer {
             command = `sslcfg -cert server -upld -i ${TFTPlistenip} -l "${SSLcertFileName}"`;
 
             this._certFilePath = await this.#checkFile(`${TFTPdir}\\${SSLcertFileName}`);
-            await this._startTFTPServer({listenip: TFTPlistenip, port: TFTPlistenport, dir: TFTPdir});
-            await this.sshConnectIfNotConnected({sshUser, sshPassword});
-            let p_downloadSSL = this._waitTFTPdownloadFile();
+            await this._TFTP.startTFTPServer({listenip: TFTPlistenip, port: TFTPlistenport, dir: TFTPdir});
+            await this.sshConnectIfNotConnected();
+            let p_downloadSSL = this._TFTP._waitTFTPdownloadFile();
             let sshout = await this.sshExecCommand(command);
             this._checkSSHout_ok(command, sshout);
             let TFTPdownloadfilename = await p_downloadSSL;
@@ -277,7 +234,7 @@ class webssl extends TFTPServer {
             throw error
         } finally {
             await this.sshDisconnect();
-            await this._stopTFTPserver();
+            await this._TFTP.stopTFTPserver();
         }
         return command;
     }
@@ -289,6 +246,52 @@ class webssl extends TFTPServer {
 };
 
 
+class mount extends IMM {
+
+    async mountSAMBA ({smbPath, smbUser, smbPassword, smbDomain}) {
+        try {
+            if (!smbPath || !smbUser || !smbPassword) {
+                throw new Error(`mountSAMBA() method needs smbPath, smbUser and smbPassword arguments`);
+            }
+            let cmd_smbDomain = smbDomain ? `-d ${smbDomain}` : '';
+            
+            let smbFileName = smbPath.match(/^.+\\(.+?)$/)[1];
+            let smbURL= smbPath.replace(/\\/g, "/");
+            smbURL=`smb:${smbURL}`;
+            let command_map = `rdmount -map -t samba -l ${smbURL} -u ${smbUser} -p ${smbPassword} ${cmd_smbDomain}`;
+            await this.sshConnectIfNotConnected();
+            let sshout = await this.sshExecCommand(command_map);
+            this._checkSSHout_dotok(command_map, sshout);
+            sshout = await this.sshExecCommand("rdmount -mount");
+            sshout = await this.sshExecCommand("rdmount -maplist");
+            if(sshout.stdout.search(new RegExp(smbFileName, "m")) == -1 || sshout.stderr.length > 0) {
+                throw new Error(`Mount with command "${command_map}" failed`);
+            }
+            return command_map;
+        } catch (error) {
+            throw error
+        } finally {
+            await this.sshDisconnect();
+        }
+    }
+
+    async unmountSAMBA (mapid=1) {
+        try {
+            let command_unmap=`rdmount -unmap ${mapid}`;
+            await this.sshConnectIfNotConnected();
+            let sshout = await this.sshExecCommand(command_unmap);
+            this._checkSSHout_dotok(command_unmap, sshout);
+            return command_unmap;
+        } catch (error) {
+            throw error
+        } finally {
+            await this.sshDisconnect();
+        }
+    }
+};
+
+
 
 module.exports.IMM = IMM;
 module.exports.IMM.webssl = webssl;
+module.exports.IMM.mount = mount;
